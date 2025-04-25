@@ -1586,7 +1586,14 @@ def process_timer_message(update: Update, context: CallbackContext) -> None:
         # Проверяем, что сообщение не является просто числом, которое может быть целью или ставкой
         if state in [CHANGE_GOAL, GOAL, CHANGE_RATE, RATE] and message_text.strip().replace('.', '').isdigit():
             logger.info(f"Обнаружен числовой ввод '{message_text}' в состоянии {state}, обрабатываем как числовой ввод")
-            # Не возвращаем здесь ничего, чтобы продолжить нормальную обработку в соответствующем обработчике
+            # Нужно перенаправить сообщение в соответствующий обработчик
+            if state == CHANGE_GOAL:
+                logger.info(f"Перенаправляем числовой ввод '{message_text}' в функцию change_goal_input")
+                return change_goal_input(update, context)
+            elif state == CHANGE_RATE:
+                logger.info(f"Перенаправляем числовой ввод '{message_text}' в функцию change_rate_input")
+                return change_rate_input(update, context)
+            # Для других состояний продолжаем обычную обработку
             return
         
         return

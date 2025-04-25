@@ -1131,8 +1131,8 @@ def button_callback(update: Update, context: CallbackContext) -> int:
                 """Удаляет все записи о времени для заданного пользователя"""
                 try:
                     logger.info(f"Удаление всех записей времени для пользователя {user_id}")
-                    # Открываем соединение с базой данных
-                    conn = sqlite3.connect("time_tracker.db")
+                    # Используем соединение с базой данных через тот же путь, что использует объект db
+                    conn = sqlite3.connect(db.db_name)
                     cursor = conn.cursor()
                     
                     # Удаляем все записи времени для пользователя

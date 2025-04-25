@@ -3,7 +3,7 @@ import os
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Updater, CommandHandler, MessageHandler, Filters, 
-    CallbackContext, ConversationHandler, CallbackQueryHandler
+    CallbackContext, ConversationHandler, CallbackQueryHandler, JobQueue
 )
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
@@ -1560,11 +1560,21 @@ def process_timer_message(update: Update, context: CallbackContext) -> None:
                 process_single_timer(update, context, minutes)
 
 
-def process_grouped_timers(context: CallbackContext):
+def process_grouped_timers(context):
     """Обработка группы пересланных таймеров"""
     try:
-        # Получаем данные из контекста задачи
-        user_id, chat_id, timer_buffer = context.job.context
+        # Проверяем, вызвана ли функция из планировщика или из обработчика сообщений
+        if hasattr(context, 'job') and hasattr(context.job, 'context'):
+            # Вызов из обработчика сообщений
+            user_id, chat_id, timer_buffer = context.job.context
+        elif isinstance(context, CallbackContext) and isinstance(context.job_queue, JobQueue):
+            # Вызов из планировщика
+            # В этом случае нам нечего обрабатывать, так как это просто проверка наличия таймеров
+            logger.info("Обработка групповых таймеров из планировщика - нет таймеров для обработки")
+            return
+        else:
+            logger.error("Неизвестный контекст вызова process_grouped_timers")
+            return
         
         logger.info(f"Обработка группы таймеров для пользователя {user_id}")
         
@@ -2299,8 +2309,8 @@ def main() -> None:
         'interval',
         minutes=1,  # Запускаем каждую минуту
         id="process_grouped_timers",
-        args=(updater.dispatcher.job_queue,),
-        timezone=pytz.UTC  # Добавьте эту строку
+        args=(),  # Убираем аргумент job_queue
+        timezone=pytz.UTC
     )
     
     # Ожидаем завершения (Ctrl+C)

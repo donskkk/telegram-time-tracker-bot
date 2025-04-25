@@ -1,0 +1,29 @@
+# Виртуальное окружение
+venv/
+env/
+.env/
+
+# Кэш Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Файлы базы данных
+*.db
+*.sqlite
+*.sqlite3
+
+# Файлы журналов
+*.log
+logs/
+
+# Файлы среды разработки
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Файлы конфигурации с секретами
+.env 

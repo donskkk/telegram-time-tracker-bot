@@ -13,8 +13,8 @@ services:
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
       - DATABASE_PATH=/app/data/time_tracker.db
     volumes:
-      - bot-data:/app/data
+      - base:/app/data
 
 volumes:
-  bot-data:
-    external: false 
+  base:
+    external: true 

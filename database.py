@@ -7,8 +7,21 @@ logger = logging.getLogger(__name__)
 
 
 class Database:
-    def __init__(self, db_name="time_tracker.db"):
-        self.db_name = db_name
+    def __init__(self, db_name=None):
+        # Проверяем наличие переменной окружения DATABASE_PATH
+        if db_name is None:
+            self.db_name = os.environ.get('DATABASE_PATH', 'time_tracker.db')
+        else:
+            self.db_name = db_name
+            
+        logger.info(f"Используется путь к базе данных: {self.db_name}")
+        
+        # Создаем директорию для базы данных, если она не существует
+        db_dir = os.path.dirname(self.db_name)
+        if db_dir and not os.path.exists(db_dir):
+            os.makedirs(db_dir, exist_ok=True)
+            logger.info(f"Создана директория для базы данных: {db_dir}")
+            
         self._init_db()
 
     def _init_db(self):

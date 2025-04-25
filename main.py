@@ -12,6 +12,7 @@ import sqlite3
 import types
 import re
 import sys
+import atexit
 
 from database import Database
 from utils import (
@@ -1489,17 +1490,15 @@ def error_handler(update, context):
 
 
 def process_timer_message(update: Update, context: CallbackContext) -> None:
-    """Обработка сообщений с таймером"""
+    """Обработка сообщений с таймерами"""
     message_text = update.message.text
     user_id = update.effective_user.id
     
     logger.info(f"Получено сообщение с возможным таймером от пользователя {user_id}: '{message_text}'")
     
-    # Проверяем, есть ли в сообщении текст о таймере
+    # Проверяем, что это сообщение от таймера
     if "таймер остановлен" in message_text.lower() and "затрачено" in message_text.lower():
-        # Всегда обрабатываем сообщения таймера независимо от состояния пользователя
-        
-        # Парсим время из сообщения
+        # Парсим время из сообщения таймера
         minutes = parse_timer_message(message_text)
         
         if minutes:
@@ -1507,46 +1506,61 @@ def process_timer_message(update: Update, context: CallbackContext) -> None:
             
             # Проверяем, зарегистрирован ли пользователь
             if not db.user_exists(user_id):
-                try:
-                    update.message.reply_text(
-                        "Для учета времени необходимо сначала настроить ставку и цель с помощью команды /start"
-                    )
-                except Exception as e:
-                    logger.error(f"Ошибка при отправке сообщения о регистрации: {e}")
+                logger.info(f"Пользователь {user_id} не зарегистрирован")
+                update.message.reply_text(
+                    "Для использования бота необходимо сначала настроить свой профиль.\n"
+                    "Используйте команду /start для настройки."
+                )
                 return
+                
+            # Проверяем, находится ли пользователь в режиме группировки таймеров
+            chat_id = update.message.chat_id
             
-            # Проверка на наличие буфера таймеров в контексте
-            if 'timer_buffer' not in context.user_data:
-                context.user_data['timer_buffer'] = []
-                context.user_data['forwarded_messages'] = []
-            
-            # Добавляем текущее время в буфер
-            context.user_data['timer_buffer'].append(minutes)
-            
-            # Добавляем сообщение в список пересланных
             try:
-                if update.message.forward_date:
-                    # Это пересланное сообщение
-                    context.user_data['forwarded_messages'].append(update.message.message_id)
+                if context.user_data.get('grouping_timers'):
+                    # Добавляем таймер в группу
+                    if 'timer_buffer' not in context.user_data:
+                        context.user_data['timer_buffer'] = []
+                        
+                    context.user_data['timer_buffer'].append(minutes)
+                    logger.info(f"Добавлен таймер в группу: {minutes} минут. Всего: {len(context.user_data['timer_buffer'])}")
+                    
+                    # Обновляем время последнего таймера
+                    context.user_data['last_timer_time'] = context.dispatcher.bot.get_me().id
+                    
+                    # Пытаемся удалить исходное сообщение
+                    try:
+                        update.message.delete()
+                    except Exception as e:
+                        logger.error(f"Не удалось удалить исходное сообщение: {e}")
+                        
+                    # Отправляем сообщение о добавлении в группу и удаляем его через 3 секунды
+                    message = update.message.reply_text(
+                        f"✅ Таймер {format_time(minutes)} добавлен в группу (всего: {len(context.user_data['timer_buffer'])})"
+                    )
+                    
+                    if message:
+                        context.job_queue.run_once(
+                            delete_message_later,
+                            3,
+                            context=(chat_id, message.message_id)
+                        )
+                    
+                    # Запланировать обработку группы через 2 секунды
+                    # Проверяем, не завершается ли интерпретатор
+                    if not (hasattr(sys, '_shutdown_thread') and sys._shutdown_thread):
+                        context.job_queue.run_once(
+                            process_grouped_timers,
+                            2,
+                            context=(user_id, chat_id, context.user_data['timer_buffer'])
+                        )
+                    else:
+                        logger.info("Пропускаем добавление задачи process_grouped_timers - интерпретатор завершает работу")
+                    
+                else:
+                    # Добавляем одиночный таймер напрямую
                     logger.info(f"Добавлено пересланное сообщение с таймером: {minutes} минут")
                     
-                    # Планируем обработку группы таймеров через 2 секунды после последнего сообщения
-                    if 'timer_group_job' in context.user_data:
-                        context.user_data['timer_group_job'].schedule_removal()
-                    
-                    # Получаем копию буфера таймеров для передачи в задачу
-                    timer_buffer = context.user_data['timer_buffer'].copy()
-                    
-                    context.user_data['timer_group_job'] = context.job_queue.run_once(
-                        process_grouped_timers, 
-                        2, 
-                        context=(user_id, update.message.chat_id, timer_buffer)
-                    )
-                    
-                    # Очищаем буфер в контексте пользователя после передачи в задачу
-                    context.user_data['timer_buffer'] = []
-                    context.user_data['forwarded_messages'] = []
-                else:
                     # Это обычное сообщение с таймером, обрабатываем сразу
                     process_single_timer(update, context, minutes)
                 
@@ -2229,131 +2243,95 @@ def manual_time_input(update: Update, context: CallbackContext) -> int:
 
 
 def main() -> None:
-    """Запуск бота"""
-    # Загружаем токен из .env файла
-    token = os.getenv("TELEGRAM_TOKEN")
-    if not token:
-        logger.error("Токен не найден в переменных окружения")
+    """Основная функция запуска бота"""
+    # Получаем токен из переменных окружения
+    TOKEN = os.getenv('TELEGRAM_TOKEN')
+    if not TOKEN:
+        logger.error("Не задан токен бота. Установите переменную окружения TELEGRAM_TOKEN.")
         return
-    
-    # Инициализация Updater
-    updater = Updater(token)
-    
-    # Получаем диспетчер для регистрации обработчиков
+
+    # Создаем экземпляр бота и диспетчера
+    updater = Updater(TOKEN)
     dispatcher = updater.dispatcher
-    
-    # Регистрация обработчика ошибок
-    dispatcher.add_error_handler(error_handler)
-    
-    # Обработчик команды /cancel
-    cancel_handler = CommandHandler("cancel", cancel_command)
-    dispatcher.add_handler(cancel_handler)
-    
-    # Обработчик команды /help
-    help_handler = CommandHandler("help", help_command)
-    dispatcher.add_handler(help_handler)
-    
-    # Обработчик команды /rate
-    rate_handler = CommandHandler("rate", rate_command)
-    dispatcher.add_handler(rate_handler)
-    
-    # Обработчик команды /goal
-    goal_handler = CommandHandler("goal", goal_command)
-    dispatcher.add_handler(goal_handler)
-    
-    # Обработчик команды /notify
-    notify_handler = CommandHandler("notify", notify_command)
-    dispatcher.add_handler(notify_handler)
-    
-    # Обработчик для регистрации нового пользователя
+
+    # Создаем обработчик разговора для регистрации
     registration_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[CommandHandler('start', start)],
         states={
             RATE: [MessageHandler(Filters.text & ~Filters.command, rate_input)],
-            GOAL: [MessageHandler(Filters.text & ~Filters.command, goal_input)]
+            GOAL: [MessageHandler(Filters.text & ~Filters.command, goal_input)],
+            CHANGE_RATE: [MessageHandler(Filters.text & ~Filters.command, change_rate_input)],
+            CHANGE_GOAL: [MessageHandler(Filters.text & ~Filters.command, change_goal_input)],
+            CHANGE_NOTIFY: [MessageHandler(Filters.text & ~Filters.command, change_notify_input)],
+            ADD_TIME: [MessageHandler(Filters.text & ~Filters.command, manual_time_input)],
+            CONFIRM_TIME: [MessageHandler(Filters.text & ~Filters.command, process_timer_message)],
+            RESET_GOAL_CONFIRM: [
+                CallbackQueryHandler(button_callback, pattern='^reset_goal_confirm$'),
+                CallbackQueryHandler(button_callback, pattern='^reset_goal_cancel$')
+            ],
         },
-        fallbacks=[CommandHandler("cancel", cancel_command)]
+        fallbacks=[CommandHandler('cancel', cancel_command)],
+        allow_reentry=True
     )
+
+    # Добавляем обработчики команд
     dispatcher.add_handler(registration_handler)
+    dispatcher.add_handler(CommandHandler('help', help_command))
+    dispatcher.add_handler(CommandHandler('stats', lambda update, context: show_main_menu(update, context)))
+    dispatcher.add_handler(CommandHandler('rate', rate_command))
+    dispatcher.add_handler(CommandHandler('goal', goal_command))
+    dispatcher.add_handler(CommandHandler('notify', notify_command))
+    dispatcher.add_handler(CommandHandler('add', lambda update, context: manual_time_input(update, context, is_command=True)))
     
-    # Обработчик для изменения ставки
-    change_rate_handler = ConversationHandler(
-        entry_points=[CommandHandler("rate", rate_command)],
-        states={
-            CHANGE_RATE: [MessageHandler(Filters.text & ~Filters.command, change_rate_input)]
-        },
-        fallbacks=[CommandHandler("cancel", cancel_command)]
-    )
-    dispatcher.add_handler(change_rate_handler)
-    
-    # Обработчик для изменения цели
-    change_goal_handler = ConversationHandler(
-        entry_points=[CommandHandler("goal", goal_command)],
-        states={
-            CHANGE_GOAL: [MessageHandler(Filters.text & ~Filters.command, change_goal_input)]
-        },
-        fallbacks=[CommandHandler("cancel", cancel_command)]
-    )
-    dispatcher.add_handler(change_goal_handler)
-    
-    # Обработчик для ввода времени вручную
-    add_time_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_callback, pattern=r'^add_time_manual$')],
-        states={
-            CONFIRM_TIME: [MessageHandler(Filters.text & ~Filters.command, manual_time_input)]
-        },
-        fallbacks=[CommandHandler("cancel", cancel_command)]
-    )
-    dispatcher.add_handler(add_time_handler)
-    
-    # Обработчик для ввода настроек уведомлений
-    change_notify_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_callback, pattern=r'^notify_day_custom$')],
-        states={
-            CHANGE_NOTIFY: [MessageHandler(Filters.text & ~Filters.command, change_notify_input)]
-        },
-        fallbacks=[CommandHandler("cancel", cancel_command)]
-    )
-    dispatcher.add_handler(change_notify_handler)
-    
-    # Обработчик для всех остальных кнопок
+    # Обработчик кнопок
     dispatcher.add_handler(CallbackQueryHandler(button_callback))
     
-    # Обработчик для сообщений о таймере
-    timer_handler = MessageHandler(
-        Filters.regex(r'^(\d+[\s]*[мMm]|\d+[\s]*[чhЧH]|\d+:\d+)') & ~Filters.command,
-        process_timer_message
-    )
-    dispatcher.add_handler(timer_handler)
+    # Обработчик обычных сообщений
+    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, process_timer_message))
     
-    # Обработчик для всех текстовых сообщений (должен быть в конце!)
-    message_handler = MessageHandler(
-        Filters.text & ~Filters.command,
-        process_timer_message
-    )
-    dispatcher.add_handler(message_handler)
+    # Добавляем обработчик ошибок
+    dispatcher.add_error_handler(error_handler)
     
-    # Запуск бота
+    # Регистрируем функцию очистки при завершении работы
+    import atexit
+    
+    def shutdown_hook():
+        """Функция, которая будет вызвана при завершении работы интерпретатора"""
+        logger.info("Завершение работы бота")
+        
+        # Останавливаем планировщик, если он запущен
+        try:
+            if scheduler and scheduler.running:
+                scheduler.shutdown(wait=False)
+                logger.info("Планировщик остановлен")
+        except Exception as e:
+            logger.error(f"Ошибка при остановке планировщика: {e}")
+    
+    # Регистрируем функцию очистки
+    atexit.register(shutdown_hook)
+    
+    # Проверяем, не завершается ли интерпретатор перед запуском бота
+    if hasattr(sys, '_shutdown_thread') and sys._shutdown_thread:
+        logger.error("Не удается запустить бота - интерпретатор завершает работу")
+        return
+
+    # Инициализируем обработчик групповых таймеров только если интерпретатор не завершается
+    if not (hasattr(sys, '_shutdown_thread') and sys._shutdown_thread):
+        scheduler.add_job(
+            process_grouped_timers,
+            'interval',
+            minutes=1,
+            id="process_grouped_timers",
+            args=(None,),  # Передаем None вместо dispatcher.bot.dispatcher
+            timezone=pytz.UTC
+        )
+
+    # Запускаем бота
     updater.start_polling()
+    logger.info("Бот запущен и ожидает сообщений")
     
-    # Инициализируем обработчик групповых таймеров
-    scheduler.add_job(
-        process_grouped_timers,
-        'interval',
-        minutes=1,  # Запускаем каждую минуту
-        id="process_grouped_timers",
-        args=(),  # Убираем аргумент job_queue
-        timezone=pytz.UTC
-    )
-    
-    # Ожидаем завершения (Ctrl+C)
-    try:
-        updater.idle()
-    finally:
-        # Завершаем работу планировщика перед выходом
-        logger.info("Завершение работы планировщика...")
-        scheduler.shutdown(wait=False)
-        logger.info("Планировщик остановлен")
+    # Ожидаем остановки
+    updater.idle()
 
 
 def notify_command(update: Update, context: CallbackContext) -> None:

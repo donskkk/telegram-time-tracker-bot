@@ -109,8 +109,26 @@ def rate_input(update: Update, context: CallbackContext) -> int:
     
     # Проверяем, не является ли это сообщением таймера
     if "таймер остановлен" in user_input.lower() and "затрачено" in user_input.lower():
-        logger.info(f"Обнаружено сообщение таймера в состоянии RATE, перенаправляем на обработку таймера")
-        return process_timer_message(update, context)
+        logger.info(f"Обнаружено сообщение таймера в состоянии RATE, обрабатываем напрямую")
+        
+        # Очищаем состояние пользователя
+        if 'state' in context.user_data:
+            del context.user_data['state']
+            
+        # Парсим время из сообщения таймера
+        minutes = parse_timer_message(user_input)
+        
+        if minutes:
+            # Обрабатываем таймер напрямую
+            process_single_timer(update, context, minutes)
+            return ConversationHandler.END
+        else:
+            # Если не удалось распознать время, продолжаем с запросом ставки
+            update.message.reply_text(
+                "Не удалось распознать время из сообщения таймера.\n\n"
+                "Пожалуйста, введите почасовую ставку (например, 500₽):"
+            )
+            return RATE
     
     # Пытаемся получить числовое значение ставки
     try:
@@ -155,8 +173,26 @@ def goal_input(update: Update, context: CallbackContext) -> int:
     
     # Проверяем, не является ли это сообщением таймера
     if "таймер остановлен" in user_input.lower() and "затрачено" in user_input.lower():
-        logger.info(f"Обнаружено сообщение таймера в состоянии GOAL, перенаправляем на обработку таймера")
-        return process_timer_message(update, context)
+        logger.info(f"Обнаружено сообщение таймера в состоянии GOAL, обрабатываем напрямую")
+        
+        # Очищаем состояние пользователя
+        if 'state' in context.user_data:
+            del context.user_data['state']
+            
+        # Парсим время из сообщения таймера
+        minutes = parse_timer_message(user_input)
+        
+        if minutes:
+            # Обрабатываем таймер напрямую
+            process_single_timer(update, context, minutes)
+            return ConversationHandler.END
+        else:
+            # Если не удалось распознать время, продолжаем с запросом цели
+            update.message.reply_text(
+                "Не удалось распознать время из сообщения таймера.\n\n"
+                "Пожалуйста, введите цель заработка (например, 50000₽):"
+            )
+            return GOAL
     
     # Пытаемся получить числовое значение цели
     try:
@@ -1458,27 +1494,9 @@ def process_timer_message(update: Update, context: CallbackContext) -> None:
     
     # Проверяем, не находится ли пользователь в одном из состояний ввода
     if context.user_data.get('state') in [CHANGE_RATE, CHANGE_GOAL, RATE, GOAL, CONFIRM_TIME, CHANGE_NOTIFY]:
+        # В этом случае обработка переадресуется соответствующей функции ввода
+        # и не обрабатывается здесь, поскольку функции ввода теперь сами умеют обрабатывать сообщения таймера
         state = context.user_data.get('state')
-        logger.info(f"Перенаправляем сообщение в соответствующий обработчик для состояния {state}")
-        
-        # Перенаправляем сообщение в соответствующий обработчик в зависимости от состояния
-        try:
-            if state == CHANGE_RATE:
-                return change_rate_input(update, context)
-            elif state == CHANGE_GOAL:
-                return change_goal_input(update, context)
-            elif state == RATE:
-                return rate_input(update, context)
-            elif state == GOAL:
-                return goal_input(update, context)
-            elif state == CONFIRM_TIME:
-                return manual_time_input(update, context)
-            elif state == CHANGE_NOTIFY:
-                return change_notify_input(update, context)
-        except Exception as e:
-            logger.error(f"Ошибка при перенаправлении сообщения в обработчик для состояния {state}: {e}")
-        
-        # Для безопасности логируем, но не продолжаем обработку таймера
         logger.info(f"Пропускаем обработку сообщения как таймера, т.к. пользователь в состоянии ввода: {state}")
         return
     
@@ -1891,8 +1909,27 @@ def change_rate_input(update: Update, context: CallbackContext) -> int:
     
     # Проверяем, не является ли это сообщением таймера
     if "таймер остановлен" in user_text.lower() and "затрачено" in user_text.lower():
-        logger.info(f"Обнаружено сообщение таймера в состоянии CHANGE_RATE, перенаправляем на обработку таймера")
-        return process_timer_message(update, context)
+        logger.info(f"Обнаружено сообщение таймера в состоянии CHANGE_RATE, обрабатываем напрямую")
+        
+        # Очищаем состояние пользователя
+        if 'state' in context.user_data:
+            del context.user_data['state']
+            
+        # Парсим время из сообщения таймера
+        from utils import parse_timer_message
+        minutes = parse_timer_message(user_text)
+        
+        if minutes:
+            # Обрабатываем таймер напрямую
+            process_single_timer(update, context, minutes)
+            return ConversationHandler.END
+        else:
+            # Если не удалось распознать время, продолжаем с запросом новой ставки
+            update.message.reply_text(
+                "Не удалось распознать время из сообщения таймера.\n\n"
+                "Пожалуйста, введите новую почасовую ставку (например, 800₽):"
+            )
+            return CHANGE_RATE
     
     try:
         # Очищаем ввод от лишних символов
@@ -1974,8 +2011,26 @@ def change_goal_input(update: Update, context: CallbackContext) -> int:
     
     # Проверяем, не является ли это сообщением таймера
     if "таймер остановлен" in user_text.lower() and "затрачено" in user_text.lower():
-        logger.info(f"Обнаружено сообщение таймера в состоянии CHANGE_GOAL, перенаправляем на обработку таймера")
-        return process_timer_message(update, context)
+        logger.info(f"Обнаружено сообщение таймера в состоянии CHANGE_GOAL, обрабатываем напрямую")
+        
+        # Очищаем состояние пользователя
+        if 'state' in context.user_data:
+            del context.user_data['state']
+            
+        # Парсим время из сообщения таймера
+        minutes = parse_timer_message(user_text)
+        
+        if minutes:
+            # Обрабатываем таймер напрямую
+            process_single_timer(update, context, minutes)
+            return ConversationHandler.END
+        else:
+            # Если не удалось распознать время, продолжаем с запросом новой цели
+            update.message.reply_text(
+                "Не удалось распознать время из сообщения таймера.\n\n"
+                "Пожалуйста, введите новую цель заработка (например, 50000₽):"
+            )
+            return CHANGE_GOAL
     
     try:
         # Очищаем ввод от лишних символов
@@ -2053,6 +2108,34 @@ def manual_time_input(update: Update, context: CallbackContext) -> int:
     # Сохраняем текущее состояние в контексте пользователя
     context.user_data['state'] = CONFIRM_TIME
     
+    # Проверяем, не является ли это сообщением таймера
+    if "таймер остановлен" in time_input.lower() and "затрачено" in time_input.lower():
+        logger.info(f"Обнаружено сообщение таймера в состоянии CONFIRM_TIME, обрабатываем напрямую")
+        
+        # Очищаем состояние пользователя
+        if 'state' in context.user_data:
+            del context.user_data['state']
+            
+        # Парсим время из сообщения таймера
+        minutes = parse_timer_message(time_input)
+        
+        if minutes:
+            # Обрабатываем таймер напрямую
+            process_single_timer(update, context, minutes)
+            return ConversationHandler.END
+        else:
+            # Если не удалось распознать время, продолжаем с запросом времени
+            send_message_with_auto_delete(
+                update, context,
+                "Не удалось распознать время из сообщения таймера.\n\n"
+                "Введите время в одном из форматов:\n"
+                "• 2ч 20м\n"
+                "• 140мин\n"
+                "• 2.33 (часы)",
+                delete_seconds=10
+            )
+            return CONFIRM_TIME
+    
     # Парсим ввод времени
     minutes = parse_time_input(time_input)
     
@@ -2091,6 +2174,10 @@ def manual_time_input(update: Update, context: CallbackContext) -> int:
         f"Заработано: {format_money(earnings)}",
         delete_seconds=5
     )
+    
+    # Очищаем состояние пользователя
+    if 'state' in context.user_data:
+        del context.user_data['state']
     
     # Показываем главное меню
     show_main_menu(update, context)

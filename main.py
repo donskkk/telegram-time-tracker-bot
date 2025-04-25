@@ -1582,6 +1582,13 @@ def process_timer_message(update: Update, context: CallbackContext) -> None:
         # В этом случае обработка переадресуется соответствующей функции ввода
         state = context.user_data.get('state')
         logger.info(f"Пропускаем обработку обычного сообщения, т.к. пользователь в состоянии ввода: {state}")
+        
+        # Проверяем, что сообщение не является просто числом, которое может быть целью или ставкой
+        if state in [CHANGE_GOAL, GOAL] and message_text.strip().replace('.', '').isdigit():
+            logger.info(f"Обнаружен числовой ввод '{message_text}' в состоянии {state}, обрабатываем как ввод цели")
+            # Не возвращаем здесь ничего, чтобы продолжить нормальную обработку в соответствующем обработчике
+            return
+        
         return
 
 

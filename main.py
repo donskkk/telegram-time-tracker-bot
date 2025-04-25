@@ -2075,6 +2075,7 @@ def change_goal_input(update: Update, context: CallbackContext) -> int:
     context.user_data['state'] = CHANGE_GOAL
     
     logger.info(f"Обработка ввода новой цели от пользователя {user_id}: '{user_text}'")
+    logger.info(f"DEBUG: Начало функции change_goal_input, текст: '{user_text}'")
     
     # Проверяем, не является ли это сообщением таймера
     if "таймер остановлен" in user_text.lower() and "затрачено" in user_text.lower():
@@ -2107,10 +2108,12 @@ def change_goal_input(update: Update, context: CallbackContext) -> int:
         logger.info(f"Очищенный текст цели: '{goal_text}'")
         
         goal = float(goal_text)
+        logger.info(f"DEBUG: Преобразовано в число: {goal}")
         
         # Обновляем цель в базе данных
         logger.info(f"Попытка обновить цель для пользователя {user_id} на {goal}")
-        db.update_goal(user_id, goal)
+        result = db.update_goal(user_id, goal)
+        logger.info(f"DEBUG: Результат обновления цели: {result}")
         logger.info(f"Цель успешно обновлена для пользователя {user_id}: {goal}")
         
         # Удаляем предыдущее сообщение с запросом и сообщение пользователя
@@ -2131,6 +2134,7 @@ def change_goal_input(update: Update, context: CallbackContext) -> int:
         # Отправляем подтверждение и сразу показываем главное меню
         logger.info("Отправка подтверждения")
         message = update.message.reply_text(f"✅ Цель успешно обновлена: {goal:.0f}₽")
+        logger.info(f"DEBUG: Сообщение подтверждения отправлено, ID: {message.message_id}")
         
         # Планируем удаление сообщения
         context.job_queue.run_once(

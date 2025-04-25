@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 import pytz
 import sqlite3
 import types
+import re
 
 from database import Database
 from utils import (
@@ -246,11 +247,10 @@ def show_main_menu(update: Update, context: CallbackContext):
     else:
         menu_text = "Главное меню:"
     
-    # Создаем клавиатуру
+    # Создаем клавиатуру (убираем кнопку "Мой прогресс")
     keyboard = [
         [
-            InlineKeyboardButton("Добавить время", callback_data='add_time'),
-            InlineKeyboardButton("Мой прогресс", callback_data='progress')
+            InlineKeyboardButton("Добавить время", callback_data='add_time')
         ],
         [
             InlineKeyboardButton("История", callback_data='history'),
@@ -277,28 +277,58 @@ def show_main_menu(update: Update, context: CallbackContext):
                 # Очищаем ссылку на недоступное сообщение
                 del context.user_data['last_bot_message']
         
-        # Отправляем новое сообщение вместо редактирования
-        if update.callback_query and update.callback_query.message:
-            chat_id = update.callback_query.message.chat_id
-            message = context.bot.send_message(
-                chat_id=chat_id,
-                text=menu_text,
-                reply_markup=reply_markup
-            )
-        elif update.message:
-            message = update.message.reply_text(
-                text=menu_text,
-                reply_markup=reply_markup
-            )
+        # Создаем диаграмму прогресса, если есть данные прогресса
+        if progress:
+            chart_buf = create_progress_chart(progress)
+            
+            # Отправляем фото с диаграммой и текстом меню
+            if update.callback_query and update.callback_query.message:
+                chat_id = update.callback_query.message.chat_id
+                message = context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=chart_buf,
+                    caption=menu_text,
+                    reply_markup=reply_markup
+                )
+            elif update.message:
+                message = update.message.reply_photo(
+                    photo=chart_buf,
+                    caption=menu_text,
+                    reply_markup=reply_markup
+                )
+            else:
+                # Если ни один из вариантов не подходит, получаем chat_id из контекста
+                chat_id = context.user_data.get('user_chat_id')
+                if chat_id:
+                    message = context.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=chart_buf,
+                        caption=menu_text,
+                        reply_markup=reply_markup
+                    )
         else:
-            # Если ни один из вариантов не подходит, получаем chat_id из контекста
-            chat_id = context.user_data.get('user_chat_id')
-            if chat_id:
+            # Если данных прогресса нет, отправляем обычное текстовое сообщение
+            if update.callback_query and update.callback_query.message:
+                chat_id = update.callback_query.message.chat_id
                 message = context.bot.send_message(
                     chat_id=chat_id,
                     text=menu_text,
                     reply_markup=reply_markup
                 )
+            elif update.message:
+                message = update.message.reply_text(
+                    text=menu_text,
+                    reply_markup=reply_markup
+                )
+            else:
+                # Если ни один из вариантов не подходит, получаем chat_id из контекста
+                chat_id = context.user_data.get('user_chat_id')
+                if chat_id:
+                    message = context.bot.send_message(
+                        chat_id=chat_id,
+                        text=menu_text,
+                        reply_markup=reply_markup
+                    )
         
         # Сохраняем данные сообщения для возможного удаления
         if message:
@@ -705,16 +735,131 @@ def button_callback(update: Update, context: CallbackContext) -> int:
         freq = data.split('_')[1]
         
         try:
-            if freq == 'off':
+            # Обработка нажатия на кнопку "Ежедневно" - показываем выбор времени
+            if freq == 'day' and len(data.split('_')) <= 2:
+                # Показываем инлайн клавиатуру с выбором времени
+                keyboard = [
+                    [
+                        InlineKeyboardButton("09:00", callback_data='notify_day_time_9_00'),
+                        InlineKeyboardButton("12:00", callback_data='notify_day_time_12_00'),
+                    ],
+                    [
+                        InlineKeyboardButton("15:00", callback_data='notify_day_time_15_00'),
+                        InlineKeyboardButton("18:00", callback_data='notify_day_time_18_00'),
+                    ],
+                    [
+                        InlineKeyboardButton("21:00", callback_data='notify_day_time_21_00'),
+                        InlineKeyboardButton("23:00", callback_data='notify_day_time_23_00'),
+                    ],
+                    [
+                        InlineKeyboardButton("Своё время", callback_data='notify_day_custom'),
+                        InlineKeyboardButton("« Назад", callback_data='notify_settings')
+                    ]
+                ]
+                
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                # Удаляем предыдущее сообщение и отправляем новое
+                try:
+                    query.message.delete()
+                except Exception as e:
+                    logger.error(f"Не удалось удалить сообщение: {e}")
+                
+                message = context.bot.send_message(
+                    chat_id=chat_id,
+                    text="Выберите время для ежедневных уведомлений:",
+                    reply_markup=reply_markup
+                )
+                
+                # Сохраняем ID сообщения
+                if message:
+                    context.user_data['last_bot_message'] = (message.chat_id, message.message_id)
+                return
+            
+            # Обработка выбора конкретного времени для ежедневных уведомлений
+            elif freq == 'day' and len(data.split('_')) > 2 and data.split('_')[2] == 'time':
+                # Получаем время из callback_data (например, notify_day_time_9_00 -> 9:00)
+                hour = int(data.split('_')[3])
+                minute = int(data.split('_')[4])
+                time_str = f"{hour:02d}:{minute:02d}"
+                
+                # Удаляем существующие задачи для пользователя
+                for job in scheduler.get_jobs():
+                    if job.id.startswith(f"notify_{user_id}"):
+                        job.remove()
+                
+                # Настраиваем ежедневное уведомление в указанное время
+                scheduler.add_job(
+                    send_notification, 'cron', hour=hour, minute=minute, id=f"notify_{user_id}_day",
+                    args=(context, user_id), timezone=pytz.UTC
+                )
+                
+                # Обновляем настройку в базе данных
+                db.update_notify_freq(user_id, f"day_{time_str}")
+                
+                freq_text = f"ежедневно в {time_str}"
+            
+            # Обработка еженедельных уведомлений с выбором дня недели
+            elif freq == 'week' and len(data.split('_')) > 2:
+                day_of_week = int(data.split('_')[2])
+                
                 # Удаляем все задачи для пользователя
                 for job in scheduler.get_jobs():
-                    if job.id == f"notify_{user_id}":
+                    if job.id.startswith(f"notify_{user_id}"):
+                        job.remove()
+                
+                # Настраиваем еженедельное уведомление в указанный день недели
+                scheduler.add_job(
+                    send_notification, 'cron', day_of_week=day_of_week, hour=9, minute=0,
+                    id=f"notify_{user_id}_week",
+                    args=(context, user_id), timezone=pytz.UTC
+                )
+                
+                # Обновляем настройку в базе данных
+                db.update_notify_freq(user_id, f"week_{day_of_week}")
+                
+                # Преобразование числового дня недели в название
+                day_names = ["понедельник", "вторник", "среду", "четверг", "пятницу", "субботу", "воскресенье"]
+                day_name = day_names[day_of_week]
+                
+                freq_text = f"еженедельно в {day_name}"
+            
+            # Обработка отключения уведомлений
+            elif freq == 'off':
+                # Удаляем все задачи для пользователя
+                for job in scheduler.get_jobs():
+                    if job.id.startswith(f"notify_{user_id}"):
                         job.remove()
                 
                 # Обновляем настройку в базе данных
                 db.update_notify_freq(user_id, 'off')
                 
                 freq_text = "отключены"
+            elif freq == 'day_multi':
+                # Удаляем существующие задачи для пользователя
+                for job in scheduler.get_jobs():
+                    if job.id.startswith(f"notify_{user_id}"):
+                        job.remove()
+                
+                # Фиксированные времена для уведомлений
+                times = [
+                    (9, 0),   # 09:00
+                    (18, 0),  # 18:00
+                    (22, 0)   # 22:00
+                ]
+                
+                # Настраиваем уведомления на каждое время
+                for i, (hour, minute) in enumerate(times):
+                    scheduler.add_job(
+                        send_notification, 'cron', hour=hour, minute=minute,
+                        id=f"notify_{user_id}_daily_{i}",
+                        args=(context, user_id), timezone=pytz.UTC
+                    )
+                
+                # Обновляем настройку в базе данных
+                db.update_notify_freq(user_id, "day_multi")
+                
+                freq_text = "ежедневно в 09:00, 18:00 и 22:00"
             else:
                 # Настраиваем уведомления с указанной частотой
                 setup_notification(context, user_id, freq)
@@ -724,8 +869,8 @@ def button_callback(update: Update, context: CallbackContext) -> int:
                 
                 freq_text = {
                     'hour': 'ежечасно',
-                    'day': 'ежедневно',
-                    'week': 'еженедельно'
+                    'day': 'ежедневно в 09:00',
+                    'week': 'еженедельно в понедельник'
                 }.get(freq, freq)
             
             # Удаляем предыдущее сообщение и отправляем новое
@@ -1001,284 +1146,252 @@ def button_callback(update: Update, context: CallbackContext) -> int:
             
         return ConversationHandler.END
     
-    return ConversationHandler.END
-
-
-def change_rate_input(update: Update, context: CallbackContext) -> int:
-    """Обработка ввода новой ставки"""
-    user_id = update.effective_user.id
-    user_text = update.message.text
-    
-    # Сохраняем текущее состояние в контексте пользователя
-    context.user_data['state'] = CHANGE_RATE
-    
-    logger.info(f"Обработка ввода новой ставки от пользователя {user_id}: '{user_text}'")
-    
-    try:
-        # Очищаем ввод от лишних символов
-        rate_text = user_text.replace('₽', '').replace('р', '').replace('руб', '')
-        rate_text = rate_text.replace(',', '.').strip()
-        
-        logger.info(f"Очищенный текст ставки: '{rate_text}'")
-        
-        rate = float(rate_text)
-        
-        # Обновляем ставку в базе данных
-        logger.info(f"Попытка обновить ставку для пользователя {user_id} на {rate}")
-        db.update_rate(user_id, rate)
-        # Не проверяем возвращаемое значение, так как метод всегда возвращает None
-        # но фактически обновляет ставку как видно из логов
-        logger.info(f"Ставка успешно обновлена для пользователя {user_id}: {rate}")
-        
-        # Удаляем предыдущее сообщение с запросом и сообщение пользователя
+    # Отображение настроек уведомлений
+    elif data == 'notify_settings':
         try:
-            logger.info("Попытка удалить сообщения")
-            if hasattr(update, 'message') and update.message:
-                update.message.delete()
-                logger.info("Сообщение пользователя удалено")
+            keyboard = [
+                [
+                    InlineKeyboardButton("Каждый час", callback_data='notify_hour'),
+                    InlineKeyboardButton("Ежедневно (09:00)", callback_data='notify_day')
+                ],
+                [
+                    InlineKeyboardButton("Трижды в день", callback_data='notify_day_multi'),
+                    InlineKeyboardButton("Еженедельно (Пн)", callback_data='notify_week')
+                ],
+                [
+                    InlineKeyboardButton("Настройка времени", callback_data='notify_custom'),
+                    InlineKeyboardButton("Отключить", callback_data='notify_off')
+                ],
+                [
+                    InlineKeyboardButton("« Назад", callback_data='settings')
+                ]
+            ]
             
-            if 'last_bot_message' in context.user_data:
-                chat_id, message_id = context.user_data['last_bot_message']
-                context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-                logger.info(f"Сообщение бота {message_id} удалено")
-                del context.user_data['last_bot_message']
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Удаляем предыдущее сообщение и отправляем новое
+            try:
+                query.message.delete()
+            except Exception as e:
+                logger.error(f"Не удалось удалить сообщение: {e}")
+                
+            message = context.bot.send_message(
+                chat_id=chat_id,
+                text="Настройка уведомлений:",
+                reply_markup=reply_markup
+            )
+            
+            # Сохраняем ID сообщения
+            if message:
+                context.user_data['last_bot_message'] = (message.chat_id, message.message_id)
         except Exception as e:
-            logger.error(f"Ошибка при удалении сообщений: {e}")
-        
-        # Отправляем подтверждение
-        logger.info("Отправка подтверждения")
-        message = update.message.reply_text(f"✅ Ставка успешно обновлена: {rate:.0f}₽")
-        
-        # Планируем удаление сообщения
-        context.job_queue.run_once(
-            delete_message_later, 
-            5, 
-            context=(message.chat_id, message.message_id)
-        )
-        
-        # Очищаем состояние пользователя
-        if 'state' in context.user_data:
-            del context.user_data['state']
-            logger.info("Состояние пользователя очищено")
-        
-        # Показываем главное меню
-        logger.info("Показываем главное меню")
-        show_main_menu(update, context)
-        
-        return ConversationHandler.END
+            logger.error(f"Ошибка при отображении настроек уведомлений: {e}")
+            show_main_menu(update, context)
     
-    except ValueError as e:
-        logger.error(f"Ошибка преобразования ставки: {e}")
-        update.message.reply_text(
-            "Пожалуйста, введите корректное числовое значение для почасовой ставки.\n"
-            "Например: 500 или 500₽"
-        )
-        
-        return CHANGE_RATE
-    except Exception as e:
-        logger.error(f"Общая ошибка при обновлении ставки: {e}")
-        update.message.reply_text(
-            "Произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте позже."
-        )
-        show_main_menu(update, context)
-        return ConversationHandler.END
-
-
-def change_goal_input(update: Update, context: CallbackContext) -> int:
-    """Обработка ввода новой цели"""
-    user_id = update.effective_user.id
-    user_text = update.message.text
-    
-    # Сохраняем текущее состояние в контексте пользователя
-    context.user_data['state'] = CHANGE_GOAL
-    
-    logger.info(f"Обработка ввода новой цели от пользователя {user_id}: '{user_text}'")
-    
-    try:
-        # Очищаем ввод от лишних символов
-        goal_text = user_text.replace('₽', '').replace('р', '').replace('руб', '')
-        goal_text = goal_text.replace(',', '.').strip()
-        
-        logger.info(f"Очищенный текст цели: '{goal_text}'")
-        
-        goal = float(goal_text)
-        
-        # Обновляем цель в базе данных
-        logger.info(f"Попытка обновить цель для пользователя {user_id} на {goal}")
-        db.update_goal(user_id, goal)
-        logger.info(f"Цель успешно обновлена для пользователя {user_id}: {goal}")
-        
-        # Удаляем предыдущее сообщение с запросом и сообщение пользователя
+    # Обработка настройки уведомлений
+    elif data == 'notify_custom':
         try:
-            logger.info("Попытка удалить сообщения")
-            if hasattr(update, 'message') and update.message:
-                update.message.delete()
-                logger.info("Сообщение пользователя удалено")
+            keyboard = [
+                [
+                    InlineKeyboardButton("День и время", callback_data='notify_day_custom'),
+                    InlineKeyboardButton("День недели", callback_data='notify_week_custom')
+                ],
+                [
+                    InlineKeyboardButton("« Назад", callback_data='notify_settings')
+                ]
+            ]
             
-            if 'last_bot_message' in context.user_data:
-                chat_id, message_id = context.user_data['last_bot_message']
-                context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-                logger.info(f"Сообщение бота {message_id} удалено")
-                del context.user_data['last_bot_message']
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Удаляем предыдущее сообщение и отправляем новое
+            try:
+                query.message.delete()
+            except Exception as e:
+                logger.error(f"Не удалось удалить сообщение: {e}")
+                
+            message = context.bot.send_message(
+                chat_id=chat_id,
+                text="Выберите, что настроить:",
+                reply_markup=reply_markup
+            )
+            
+            # Сохраняем ID сообщения
+            if message:
+                context.user_data['last_bot_message'] = (message.chat_id, message.message_id)
         except Exception as e:
-            logger.error(f"Ошибка при удалении сообщений: {e}")
+            logger.error(f"Ошибка при отображении настроек пользовательских уведомлений: {e}")
+            show_main_menu(update, context)
+    
+    # Настройка ежедневных уведомлений с указанием времени
+    elif data == 'notify_day_custom':
+        try:
+            # Удаляем предыдущее сообщение
+            try:
+                query.message.delete()
+            except Exception as e:
+                logger.error(f"Не удалось удалить сообщение: {e}")
+            
+            message = context.bot.send_message(
+                chat_id=chat_id,
+                text="Введите время для ежедневных уведомлений в формате ЧЧ:ММ (например, 09:00):"
+            )
+            
+            # Устанавливаем состояние для обработки ввода
+            context.user_data['state'] = CHANGE_NOTIFY
+            context.user_data['notify_type'] = 'day'
+            
+            # Сохраняем ID сообщения
+            if message:
+                context.user_data['last_bot_message'] = (message.chat_id, message.message_id)
+        except Exception as e:
+            logger.error(f"Ошибка при настройке ежедневных уведомлений: {e}")
+            show_main_menu(update, context)
+    
+    # Настройка еженедельных уведомлений с указанием дня недели
+    elif data == 'notify_week_custom':
+        try:
+            keyboard = [
+                [
+                    InlineKeyboardButton("Понедельник", callback_data='notify_week_0'),
+                    InlineKeyboardButton("Вторник", callback_data='notify_week_1')
+                ],
+                [
+                    InlineKeyboardButton("Среда", callback_data='notify_week_2'),
+                    InlineKeyboardButton("Четверг", callback_data='notify_week_3')
+                ],
+                [
+                    InlineKeyboardButton("Пятница", callback_data='notify_week_4'),
+                    InlineKeyboardButton("Суббота", callback_data='notify_week_5')
+                ],
+                [
+                    InlineKeyboardButton("Воскресенье", callback_data='notify_week_6')
+                ],
+                [
+                    InlineKeyboardButton("« Назад", callback_data='notify_custom')
+                ]
+            ]
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Удаляем предыдущее сообщение и отправляем новое
+            try:
+                query.message.delete()
+            except Exception as e:
+                logger.error(f"Не удалось удалить сообщение: {e}")
+                
+            message = context.bot.send_message(
+                chat_id=chat_id,
+                text="Выберите день недели для еженедельных уведомлений:",
+                reply_markup=reply_markup
+            )
+            
+            # Сохраняем ID сообщения
+            if message:
+                context.user_data['last_bot_message'] = (message.chat_id, message.message_id)
+        except Exception as e:
+            logger.error(f"Ошибка при настройке еженедельных уведомлений: {e}")
+            show_main_menu(update, context)
+    
+    elif data.startswith('notify_'):
+        freq = data.split('_')[1]
         
-        # Отправляем подтверждение и сразу показываем главное меню
-        logger.info("Отправка подтверждения")
-        message = update.message.reply_text(f"✅ Цель успешно обновлена: {goal:.0f}₽")
-        
-        # Планируем удаление сообщения
-        context.job_queue.run_once(
-            delete_message_later, 
-            5, 
-            context=(message.chat_id, message.message_id)
-        )
-        
-        # Очищаем состояние пользователя
-        if 'state' in context.user_data:
-            del context.user_data['state']
-            logger.info("Состояние пользователя очищено")
-        
-        # Показываем главное меню
-        logger.info("Показываем главное меню")
-        show_main_menu(update, context)
-        
-        return ConversationHandler.END
-    
-    except ValueError as e:
-        logger.error(f"Ошибка преобразования цели: {e}")
-        update.message.reply_text(
-            "Пожалуйста, введите корректное числовое значение для цели заработка.\n"
-            "Например: 50000 или 50000₽"
-        )
-        
-        return CHANGE_GOAL
-    except Exception as e:
-        logger.error(f"Общая ошибка при обновлении цели: {e}")
-        update.message.reply_text(
-            "Произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте позже."
-        )
-        show_main_menu(update, context)
-        return ConversationHandler.END
-
-
-def manual_time_input(update: Update, context: CallbackContext) -> int:
-    """Обработка ручного ввода времени"""
-    user_id = update.effective_user.id
-    time_input = update.message.text.strip()
-    
-    # Сохраняем текущее состояние в контексте пользователя
-    context.user_data['state'] = CONFIRM_TIME
-    
-    # Парсим ввод времени
-    minutes = parse_time_input(time_input)
-    
-    if minutes is None:
-        send_message_with_auto_delete(
-            update, context,
-            "Не удалось распознать формат времени. Попробуйте еще раз.\n"
-            "Примеры форматов:\n"
-            "• 2ч 20м\n"
-            "• 140мин\n"
-            "• 2.33 (часы)",
-            delete_seconds=10
-        )
-        return CONFIRM_TIME
-    
-    # Получаем данные пользователя
-    user_data = db.get_user_data(user_id)
-    rate = user_data['rate']
-    
-    # Расчет заработка
-    earnings = (minutes / 60) * rate
-    
-    # Добавляем запись в базу данных
-    db.add_time_record(user_id, minutes)
-    
-    # Удаляем сообщение пользователя
-    try:
-        update.message.delete()
-    except Exception as e:
-        logger.error(f"Не удалось удалить сообщение пользователя: {e}")
-    
-    # Отправляем подтверждение с автоудалением
-    send_message_with_auto_delete(
-        update, context,
-        f"✅\nВремя добавлено: {format_time(minutes)}\n"
-        f"Заработано: {format_money(earnings)}",
-        delete_seconds=5
-    )
-    
-    # Показываем главное меню
-    show_main_menu(update, context)
-    
-    return ConversationHandler.END
-
-
-def rate_command(update: Update, context: CallbackContext) -> int:
-    """Обработчик команды /rate"""
-    update.message.reply_text(
-        "Введите новую почасовую ставку:"
-    )
-    
-    return CHANGE_RATE
-
-
-def goal_command(update: Update, context: CallbackContext) -> int:
-    """Обработчик команды /goal"""
-    update.message.reply_text(
-        "Введите новую цель заработка:"
-    )
-    
-    return CHANGE_GOAL
-
-
-def notify_command(update: Update, context: CallbackContext) -> None:
-    """Обработчик команды /notify"""
-    user_id = update.effective_user.id
-    
-    if not context.args:
-        update.message.reply_text(
-            "Использование: /notify [hour/day/week/off]"
-        )
-        return
-    
-    freq = context.args[0].lower()
-    
-    if freq not in ['hour', 'day', 'week', 'off']:
-        update.message.reply_text(
-            "Неверный параметр частоты. Используйте: hour, day, week или off."
-        )
-        return
-    
-    if freq == 'off':
-        # Удаляем все задачи для пользователя
-        for job in scheduler.get_jobs():
-            if job.id == f"notify_{user_id}":
-                job.remove()
-        
-        # Обновляем настройку в базе данных
-        db.update_notify_freq(user_id, 'off')
-        
-        update.message.reply_text(
-            "Уведомления отключены."
-        )
-    else:
-        # Настраиваем уведомления с указанной частотой
-        setup_notification(context, user_id, freq)
-        
-        # Обновляем настройку в базе данных
-        db.update_notify_freq(user_id, freq)
-        
-        freq_text = {
-            'hour': 'ежечасно',
-            'day': 'ежедневно',
-            'week': 'еженедельно'
-        }.get(freq, freq)
-        
-        update.message.reply_text(
-            f"Уведомления настроены на {freq_text}."
-        )
+        try:
+            # Обработка еженедельных уведомлений с выбором дня недели
+            if freq == 'week' and len(data.split('_')) > 2:
+                day_of_week = int(data.split('_')[2])
+                
+                # Удаляем все задачи для пользователя
+                for job in scheduler.get_jobs():
+                    if job.id.startswith(f"notify_{user_id}"):
+                        job.remove()
+                
+                # Настраиваем еженедельное уведомление в указанный день недели
+                scheduler.add_job(
+                    send_notification, 'cron', day_of_week=day_of_week, hour=9, minute=0,
+                    id=f"notify_{user_id}_week",
+                    args=(context, user_id), timezone=pytz.UTC
+                )
+                
+                # Обновляем настройку в базе данных
+                db.update_notify_freq(user_id, f"week_{day_of_week}")
+                
+                # Преобразование числового дня недели в название
+                day_names = ["понедельник", "вторник", "среду", "четверг", "пятницу", "субботу", "воскресенье"]
+                day_name = day_names[day_of_week]
+                
+                freq_text = f"еженедельно в {day_name}"
+            elif freq == 'off':
+                # Удаляем все задачи для пользователя
+                for job in scheduler.get_jobs():
+                    if job.id.startswith(f"notify_{user_id}"):
+                        job.remove()
+                
+                # Обновляем настройку в базе данных
+                db.update_notify_freq(user_id, 'off')
+                
+                freq_text = "отключены"
+            elif freq == 'day_multi':
+                # Удаляем существующие задачи для пользователя
+                for job in scheduler.get_jobs():
+                    if job.id.startswith(f"notify_{user_id}"):
+                        job.remove()
+                
+                # Фиксированные времена для уведомлений
+                times = [
+                    (9, 0),   # 09:00
+                    (18, 0),  # 18:00
+                    (22, 0)   # 22:00
+                ]
+                
+                # Настраиваем уведомления на каждое время
+                for i, (hour, minute) in enumerate(times):
+                    scheduler.add_job(
+                        send_notification, 'cron', hour=hour, minute=minute,
+                        id=f"notify_{user_id}_daily_{i}",
+                        args=(context, user_id), timezone=pytz.UTC
+                    )
+                
+                # Обновляем настройку в базе данных
+                db.update_notify_freq(user_id, "day_multi")
+                
+                freq_text = "ежедневно в 09:00, 18:00 и 22:00"
+            else:
+                # Настраиваем уведомления с указанной частотой
+                setup_notification(context, user_id, freq)
+                
+                # Обновляем настройку в базе данных
+                db.update_notify_freq(user_id, freq)
+                
+                freq_text = {
+                    'hour': 'ежечасно',
+                    'day': 'ежедневно в 09:00',
+                    'week': 'еженедельно в понедельник'
+                }.get(freq, freq)
+            
+            # Удаляем предыдущее сообщение и отправляем новое
+            try:
+                query.message.delete()
+            except Exception as e:
+                logger.error(f"Не удалось удалить сообщение: {e}")
+            
+            keyboard = [
+                [InlineKeyboardButton("« Назад", callback_data='settings')]
+            ]
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            message = context.bot.send_message(
+                chat_id=chat_id,
+                text=f"Уведомления будут приходить {freq_text}.",
+                reply_markup=reply_markup
+            )
+            
+            # Сохраняем ID сообщения
+            if message:
+                context.user_data['last_bot_message'] = (message.chat_id, message.message_id)
+        except Exception as e:
+            logger.error(f"Ошибка при настройке уведомлений: {e}")
+            show_main_menu(update, context)
 
 
 def help_command(update: Update, context: CallbackContext) -> None:
@@ -1286,9 +1399,15 @@ def help_command(update: Update, context: CallbackContext) -> None:
     update.message.reply_text(
         "Список доступных команд:\n\n"
         "/start - Начать использование бота\n"
-        "/rate - Изменить почасовую ставку\n"
+        "/rate - Установить новую ставку\n"
         "/goal - Установить новую цель\n"
-        "/notify [hour/day/week/off] - Управление уведомлениями\n"
+        "/notify - Управление уведомлениями\n"
+        "  Примеры:\n"
+        "  /notify hour - уведомления каждый час\n"
+        "  /notify day 09:00 - ежедневно в указанное время\n"
+        "  /notify day_multi - ежедневно в 09:00, 18:00 и 22:00\n"
+        "  /notify week 0 - еженедельно в понедельник\n"
+        "  /notify off - отключить уведомления\n"
         "/cancel - Отменить текущее действие\n"
         "/help - Показать справку"
     )
@@ -1328,7 +1447,7 @@ def process_timer_message(update: Update, context: CallbackContext) -> None:
     user_id = update.effective_user.id
     
     # Проверяем, не находится ли пользователь в одном из состояний ввода
-    if context.user_data.get('state') in [CHANGE_RATE, CHANGE_GOAL, RATE, GOAL, CONFIRM_TIME]:
+    if context.user_data.get('state') in [CHANGE_RATE, CHANGE_GOAL, RATE, GOAL, CONFIRM_TIME, CHANGE_NOTIFY]:
         state = context.user_data.get('state')
         logger.info(f"Перенаправляем сообщение в соответствующий обработчик для состояния {state}")
         
@@ -1344,6 +1463,8 @@ def process_timer_message(update: Update, context: CallbackContext) -> None:
                 return goal_input(update, context)
             elif state == CONFIRM_TIME:
                 return manual_time_input(update, context)
+            elif state == CHANGE_NOTIFY:
+                return change_notify_input(update, context)
         except Exception as e:
             logger.error(f"Ошибка при перенаправлении сообщения в обработчик для состояния {state}: {e}")
         
@@ -1633,81 +1754,617 @@ def delete_message_if_exists(update, context):
                 del context.user_data['last_bot_message']
 
 
+def change_notify_input(update: Update, context: CallbackContext) -> int:
+    """Обработка ввода настроек уведомлений"""
+    user_id = update.effective_user.id
+    user_text = update.message.text.strip()
+    
+    # Проверяем, есть ли сохраненный тип уведомления
+    notify_type = context.user_data.get('notify_type')
+    if notify_type != 'day':
+        # Если тип уведомления не day, возвращаемся в главное меню
+        update.message.reply_text(
+            "Произошла ошибка при настройке уведомлений. Пожалуйста, попробуйте позже."
+        )
+        show_main_menu(update, context)
+        return ConversationHandler.END
+    
+    # Обрабатываем ввод времени для ежедневных уведомлений
+    if not re.match(r'^\d{1,2}:\d{2}$', user_text):
+        update.message.reply_text(
+            "Неверный формат времени. Пожалуйста, используйте формат ЧЧ:ММ (например, 09:00)."
+        )
+        return CHANGE_NOTIFY
+    
+    try:
+        # Разбираем время
+        hour, minute = map(int, user_text.split(':'))
+        
+        # Проверяем корректность времени
+        if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+            update.message.reply_text(
+                "Неверное время. Часы должны быть от 0 до 23, минуты от 0 до 59."
+            )
+            return CHANGE_NOTIFY
+        
+        # Удаляем существующие задачи для пользователя
+        for job in scheduler.get_jobs():
+            if job.id.startswith(f"notify_{user_id}"):
+                job.remove()
+        
+        # Настраиваем ежедневное уведомление в указанное время
+        scheduler.add_job(
+            send_notification, 'cron', hour=hour, minute=minute, id=f"notify_{user_id}_day",
+            args=(context, user_id), timezone=pytz.UTC
+        )
+        
+        # Обновляем настройку в базе данных
+        db.update_notify_freq(user_id, f"day_{user_text}")
+        
+        # Удаляем предыдущее сообщение с запросом и сообщение пользователя
+        try:
+            if hasattr(update, 'message') and update.message:
+                update.message.delete()
+            
+            if 'last_bot_message' in context.user_data:
+                chat_id, message_id = context.user_data['last_bot_message']
+                context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                del context.user_data['last_bot_message']
+        except Exception as e:
+            logger.error(f"Ошибка при удалении сообщений: {e}")
+        
+        # Очищаем состояние пользователя
+        if 'state' in context.user_data:
+            del context.user_data['state']
+        if 'notify_type' in context.user_data:
+            del context.user_data['notify_type']
+        
+        # Отправляем подтверждение
+        update.message.reply_text(
+            f"✅ Уведомления настроены на ежедневную отправку в {user_text}."
+        )
+        
+        # Показываем главное меню
+        show_main_menu(update, context)
+        
+        return ConversationHandler.END
+    
+    except Exception as e:
+        logger.error(f"Ошибка при настройке уведомлений: {e}")
+        update.message.reply_text(
+            "Произошла ошибка при настройке уведомлений. Пожалуйста, попробуйте позже."
+        )
+        show_main_menu(update, context)
+        return ConversationHandler.END
+
+
+def rate_command(update: Update, context: CallbackContext) -> int:
+    """Обработчик команды /rate"""
+    update.message.reply_text(
+        "Введите новую почасовую ставку:"
+    )
+    
+    return CHANGE_RATE
+
+
+def goal_command(update: Update, context: CallbackContext) -> int:
+    """Обработчик команды /goal"""
+    update.message.reply_text(
+        "Введите новую цель заработка:"
+    )
+    
+    return CHANGE_GOAL
+
+
+def change_rate_input(update: Update, context: CallbackContext) -> int:
+    """Обработка ввода новой ставки"""
+    user_id = update.effective_user.id
+    user_text = update.message.text
+    
+    # Сохраняем текущее состояние в контексте пользователя
+    context.user_data['state'] = CHANGE_RATE
+    
+    logger.info(f"Обработка ввода новой ставки от пользователя {user_id}: '{user_text}'")
+    
+    try:
+        # Очищаем ввод от лишних символов
+        rate_text = user_text.replace('₽', '').replace('р', '').replace('руб', '')
+        rate_text = rate_text.replace(',', '.').strip()
+        
+        logger.info(f"Очищенный текст ставки: '{rate_text}'")
+        
+        rate = float(rate_text)
+        
+        # Обновляем ставку в базе данных
+        logger.info(f"Попытка обновить ставку для пользователя {user_id} на {rate}")
+        db.update_rate(user_id, rate)
+        logger.info(f"Ставка успешно обновлена для пользователя {user_id}: {rate}")
+        
+        # Удаляем предыдущее сообщение с запросом и сообщение пользователя
+        try:
+            logger.info("Попытка удалить сообщения")
+            if hasattr(update, 'message') and update.message:
+                update.message.delete()
+                logger.info("Сообщение пользователя удалено")
+            
+            if 'last_bot_message' in context.user_data:
+                chat_id, message_id = context.user_data['last_bot_message']
+                context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                logger.info(f"Сообщение бота {message_id} удалено")
+                del context.user_data['last_bot_message']
+        except Exception as e:
+            logger.error(f"Ошибка при удалении сообщений: {e}")
+        
+        # Отправляем подтверждение
+        logger.info("Отправка подтверждения")
+        message = update.message.reply_text(f"✅ Ставка успешно обновлена: {rate:.0f}₽")
+        
+        # Планируем удаление сообщения
+        context.job_queue.run_once(
+            delete_message_later, 
+            5, 
+            context=(message.chat_id, message.message_id)
+        )
+        
+        # Очищаем состояние пользователя
+        if 'state' in context.user_data:
+            del context.user_data['state']
+            logger.info("Состояние пользователя очищено")
+        
+        # Показываем главное меню
+        logger.info("Показываем главное меню")
+        show_main_menu(update, context)
+        
+        return ConversationHandler.END
+    
+    except ValueError as e:
+        logger.error(f"Ошибка преобразования ставки: {e}")
+        update.message.reply_text(
+            "Пожалуйста, введите корректное числовое значение для почасовой ставки.\n"
+            "Например: 500 или 500₽"
+        )
+        
+        return CHANGE_RATE
+    except Exception as e:
+        logger.error(f"Общая ошибка при обновлении ставки: {e}")
+        update.message.reply_text(
+            "Произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте позже."
+        )
+        show_main_menu(update, context)
+        return ConversationHandler.END
+
+
+def change_goal_input(update: Update, context: CallbackContext) -> int:
+    """Обработка ввода новой цели"""
+    user_id = update.effective_user.id
+    user_text = update.message.text
+    
+    # Сохраняем текущее состояние в контексте пользователя
+    context.user_data['state'] = CHANGE_GOAL
+    
+    logger.info(f"Обработка ввода новой цели от пользователя {user_id}: '{user_text}'")
+    
+    try:
+        # Очищаем ввод от лишних символов
+        goal_text = user_text.replace('₽', '').replace('р', '').replace('руб', '')
+        goal_text = goal_text.replace(',', '.').strip()
+        
+        logger.info(f"Очищенный текст цели: '{goal_text}'")
+        
+        goal = float(goal_text)
+        
+        # Обновляем цель в базе данных
+        logger.info(f"Попытка обновить цель для пользователя {user_id} на {goal}")
+        db.update_goal(user_id, goal)
+        logger.info(f"Цель успешно обновлена для пользователя {user_id}: {goal}")
+        
+        # Удаляем предыдущее сообщение с запросом и сообщение пользователя
+        try:
+            logger.info("Попытка удалить сообщения")
+            if hasattr(update, 'message') and update.message:
+                update.message.delete()
+                logger.info("Сообщение пользователя удалено")
+            
+            if 'last_bot_message' in context.user_data:
+                chat_id, message_id = context.user_data['last_bot_message']
+                context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                logger.info(f"Сообщение бота {message_id} удалено")
+                del context.user_data['last_bot_message']
+        except Exception as e:
+            logger.error(f"Ошибка при удалении сообщений: {e}")
+        
+        # Отправляем подтверждение и сразу показываем главное меню
+        logger.info("Отправка подтверждения")
+        message = update.message.reply_text(f"✅ Цель успешно обновлена: {goal:.0f}₽")
+        
+        # Планируем удаление сообщения
+        context.job_queue.run_once(
+            delete_message_later, 
+            5, 
+            context=(message.chat_id, message.message_id)
+        )
+        
+        # Очищаем состояние пользователя
+        if 'state' in context.user_data:
+            del context.user_data['state']
+            logger.info("Состояние пользователя очищено")
+        
+        # Показываем главное меню
+        logger.info("Показываем главное меню")
+        show_main_menu(update, context)
+    
+        return ConversationHandler.END
+    
+    except ValueError as e:
+        logger.error(f"Ошибка преобразования цели: {e}")
+        update.message.reply_text(
+            "Пожалуйста, введите корректное числовое значение для цели заработка.\n"
+            "Например: 50000 или 50000₽"
+        )
+        
+        return CHANGE_GOAL
+    except Exception as e:
+        logger.error(f"Общая ошибка при обновлении цели: {e}")
+        update.message.reply_text(
+            "Произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте позже."
+        )
+        show_main_menu(update, context)
+        return ConversationHandler.END
+
+
+def manual_time_input(update: Update, context: CallbackContext) -> int:
+    """Обработка ручного ввода времени"""
+    user_id = update.effective_user.id
+    time_input = update.message.text.strip()
+    
+    # Сохраняем текущее состояние в контексте пользователя
+    context.user_data['state'] = CONFIRM_TIME
+    
+    # Парсим ввод времени
+    minutes = parse_time_input(time_input)
+    
+    if minutes is None:
+        send_message_with_auto_delete(
+            update, context,
+            "Не удалось распознать формат времени. Попробуйте еще раз.\n"
+            "Примеры форматов:\n"
+            "• 2ч 20м\n"
+            "• 140мин\n"
+            "• 2.33 (часы)",
+            delete_seconds=10
+        )
+        return CONFIRM_TIME
+    
+    # Получаем данные пользователя
+    user_data = db.get_user_data(user_id)
+    rate = user_data['rate']
+    
+    # Расчет заработка
+    earnings = (minutes / 60) * rate
+    
+    # Добавляем запись в базу данных
+    db.add_time_record(user_id, minutes)
+    
+    # Удаляем сообщение пользователя
+    try:
+        update.message.delete()
+    except Exception as e:
+        logger.error(f"Не удалось удалить сообщение пользователя: {e}")
+    
+    # Отправляем подтверждение с автоудалением
+    send_message_with_auto_delete(
+        update, context,
+        f"✅\nВремя добавлено: {format_time(minutes)}\n"
+        f"Заработано: {format_money(earnings)}",
+        delete_seconds=5
+    )
+    
+    # Показываем главное меню
+    show_main_menu(update, context)
+    
+    return ConversationHandler.END
+
+
 def main() -> None:
     """Запуск бота"""
-    # Получаем токен из переменной окружения или файла
-    token = os.environ.get("TELEGRAM_TOKEN")
-    
+    # Загружаем токен из .env файла
+    token = os.getenv("TELEGRAM_TOKEN")
     if not token:
-        logging.error("Требуется токен телеграм-бота. Укажите TELEGRAM_TOKEN в переменных окружения.")
+        logger.error("Токен не найден в переменных окружения")
         return
     
-    # Создаем Updater
+    # Инициализация Updater
     updater = Updater(token)
     
     # Получаем диспетчер для регистрации обработчиков
     dispatcher = updater.dispatcher
     
-    # Добавляем глобальный обработчик ошибок
+    # Регистрация обработчика ошибок
     dispatcher.add_error_handler(error_handler)
     
-    # Создаем обработчик разговора для начальной настройки
-    conv_handler = ConversationHandler(
-        entry_points=[
-            CommandHandler("start", start),
-            CommandHandler("rate", rate_command),
-            CommandHandler("goal", goal_command)
-        ],
+    # Обработчик команды /cancel
+    cancel_handler = CommandHandler("cancel", cancel_command)
+    dispatcher.add_handler(cancel_handler)
+    
+    # Обработчик команды /help
+    help_handler = CommandHandler("help", help_command)
+    dispatcher.add_handler(help_handler)
+    
+    # Обработчик команды /rate
+    rate_handler = CommandHandler("rate", rate_command)
+    dispatcher.add_handler(rate_handler)
+    
+    # Обработчик команды /goal
+    goal_handler = CommandHandler("goal", goal_command)
+    dispatcher.add_handler(goal_handler)
+    
+    # Обработчик команды /notify
+    notify_handler = CommandHandler("notify", notify_command)
+    dispatcher.add_handler(notify_handler)
+    
+    # Обработчик для регистрации нового пользователя
+    registration_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
         states={
             RATE: [MessageHandler(Filters.text & ~Filters.command, rate_input)],
-            GOAL: [MessageHandler(Filters.text & ~Filters.command, goal_input)],
-            ADD_TIME: [CallbackQueryHandler(button_callback)],
-            CONFIRM_TIME: [
-                CallbackQueryHandler(button_callback),
-                MessageHandler(Filters.text & ~Filters.command, manual_time_input)
-            ],
-            CHANGE_RATE: [
-                CallbackQueryHandler(button_callback),
-                MessageHandler(Filters.text & ~Filters.command, change_rate_input)
-            ],
-            CHANGE_GOAL: [
-                CallbackQueryHandler(button_callback),
-                MessageHandler(Filters.text & ~Filters.command, change_goal_input)
-            ],
-            RESET_GOAL_CONFIRM: [CallbackQueryHandler(button_callback)],
+            GOAL: [MessageHandler(Filters.text & ~Filters.command, goal_input)]
         },
-        fallbacks=[
-            CommandHandler("start", start),
-            CommandHandler("help", help_command),
-            CommandHandler("cancel", cancel_command)
-        ],
-        allow_reentry=True
+        fallbacks=[CommandHandler("cancel", cancel_command)]
     )
+    dispatcher.add_handler(registration_handler)
     
-    # ВАЖНО: сначала регистрируем ConversationHandler, затем остальные обработчики
-    dispatcher.add_handler(conv_handler)
+    # Обработчик для изменения ставки
+    change_rate_handler = ConversationHandler(
+        entry_points=[CommandHandler("rate", rate_command)],
+        states={
+            CHANGE_RATE: [MessageHandler(Filters.text & ~Filters.command, change_rate_input)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel_command)]
+    )
+    dispatcher.add_handler(change_rate_handler)
     
-    # Добавляем обработчик для кнопок меню
+    # Обработчик для изменения цели
+    change_goal_handler = ConversationHandler(
+        entry_points=[CommandHandler("goal", goal_command)],
+        states={
+            CHANGE_GOAL: [MessageHandler(Filters.text & ~Filters.command, change_goal_input)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel_command)]
+    )
+    dispatcher.add_handler(change_goal_handler)
+    
+    # Обработчик для ввода времени вручную
+    add_time_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(button_callback, pattern=r'^add_time_manual$')],
+        states={
+            CONFIRM_TIME: [MessageHandler(Filters.text & ~Filters.command, manual_time_input)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel_command)]
+    )
+    dispatcher.add_handler(add_time_handler)
+    
+    # Обработчик для ввода настроек уведомлений
+    change_notify_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(button_callback, pattern=r'^notify_day_custom$')],
+        states={
+            CHANGE_NOTIFY: [MessageHandler(Filters.text & ~Filters.command, change_notify_input)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel_command)]
+    )
+    dispatcher.add_handler(change_notify_handler)
+    
+    # Обработчик для всех остальных кнопок
     dispatcher.add_handler(CallbackQueryHandler(button_callback))
     
-    # Обработчики команд
-    dispatcher.add_handler(CommandHandler("help", help_command))
-    dispatcher.add_handler(CommandHandler("notify", notify_command))
-    
-    # Обработчик сообщений с таймером (для обычных и пересланных сообщений)
-    # НЕ ИЗМЕНЯЕМ ПОРЯДОК - этот обработчик должен быть последним!
-    dispatcher.add_handler(MessageHandler(
-        (Filters.text | Filters.forwarded) & ~Filters.command & ~Filters.update.edited_message,
+    # Обработчик для сообщений о таймере
+    timer_handler = MessageHandler(
+        Filters.regex(r'^(\d+[\s]*[мMm]|\d+[\s]*[чhЧH]|\d+:\d+)') & ~Filters.command,
         process_timer_message
-    ))
+    )
+    dispatcher.add_handler(timer_handler)
     
-    # Запускаем бота
+    # Обработчик для всех текстовых сообщений (должен быть в конце!)
+    message_handler = MessageHandler(
+        Filters.text & ~Filters.command,
+        process_timer_message
+    )
+    dispatcher.add_handler(message_handler)
+    
+    # Запуск бота
     updater.start_polling()
     
-    # Логируем информацию о запуске
-    logger.info("Бот запущен и ожидает сообщений.")
+    # Инициализируем обработчик групповых таймеров
+    scheduler.add_job(
+        process_grouped_timers,
+        'interval',
+        minutes=1,  # Запускаем каждую минуту
+        id="process_grouped_timers",
+        args=(updater.dispatcher,),
+        timezone=pytz.UTC  # Добавьте эту строку
+    )
     
+    # Ожидаем завершения (Ctrl+C)
     updater.idle()
+
+
+def notify_command(update: Update, context: CallbackContext) -> None:
+    """Настройка уведомлений через команду"""
+    user_id = update.effective_user.id
+    
+    # Проверяем, есть ли аргументы команды
+    if not context.args or len(context.args) < 1:
+        update.message.reply_text(
+            "Использование:\n"
+            "/notify hour - уведомления каждый час\n"
+            "/notify day [HH:MM] - ежедневно (опционально в указанное время)\n"
+            "/notify day_multi - ежедневно в 09:00, 18:00 и 22:00\n"
+            "/notify week [0-6] - еженедельно (опционально с указанием дня недели 0-6, где 0=пн)\n"
+            "/notify off - отключить уведомления"
+        )
+        return
+    
+    freq = context.args[0].lower()
+    
+    # Проверка на базовые частоты уведомлений
+    if freq not in ['hour', 'day', 'day_multi', 'week', 'off']:
+        update.message.reply_text(
+            "Неверный параметр частоты. Используйте: hour, day, day_multi, week или off."
+        )
+        return
+    
+    # Обработка отключения уведомлений
+    if freq == 'off':
+        # Удаляем все задачи для пользователя
+        for job in scheduler.get_jobs():
+            if job.id.startswith(f"notify_{user_id}"):
+                job.remove()
+        
+        # Обновляем настройку в базе данных
+        db.update_notify_freq(user_id, 'off')
+        
+        update.message.reply_text(
+            "Уведомления отключены."
+        )
+        return
+        
+    # Обработка ежечасных уведомлений
+    if freq == 'hour':
+        # Настраиваем уведомления ежечасно
+        setup_notification(context, user_id, 'hour')
+        
+        # Обновляем настройку в базе данных
+        db.update_notify_freq(user_id, 'hour')
+        
+        update.message.reply_text(
+            "Уведомления настроены на ежечасную отправку."
+        )
+        return
+        
+    # Обработка ежедневных уведомлений с указанным временем
+    if freq == 'day':
+        time_str = "09:00"  # время по умолчанию
+        
+        # Если указано конкретное время
+        if len(context.args) > 1:
+            time_str = context.args[1]
+            
+            # Проверка формата времени
+            import re
+            if not re.match(r'^\d{1,2}:\d{2}$', time_str):
+                update.message.reply_text(
+                    "Неверный формат времени. Используйте формат HH:MM (например, 09:00)."
+                )
+                return
+        
+        try:
+            # Удаляем существующие задачи для пользователя
+            for job in scheduler.get_jobs():
+                if job.id.startswith(f"notify_{user_id}"):
+                    job.remove()
+            
+            # Разбираем время
+            hour, minute = map(int, time_str.split(':'))
+            
+            # Настраиваем ежедневное уведомление в указанное время
+            scheduler.add_job(
+                send_notification, 'cron', hour=hour, minute=minute, id=f"notify_{user_id}_day",
+                args=(context, user_id), timezone=pytz.UTC
+            )
+            
+            # Обновляем настройку в базе данных
+            db.update_notify_freq(user_id, f"day_{time_str}")
+            
+            update.message.reply_text(
+                f"Уведомления настроены на ежедневную отправку в {time_str}."
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при настройке ежедневных уведомлений: {e}")
+            update.message.reply_text(
+                "Произошла ошибка при настройке уведомлений. Пожалуйста, попробуйте позже."
+            )
+        return
+        
+    # Обработка множественных ежедневных уведомлений
+    if freq == 'day_multi':
+        try:
+            # Удаляем существующие задачи для пользователя
+            for job in scheduler.get_jobs():
+                if job.id.startswith(f"notify_{user_id}"):
+                    job.remove()
+            
+            # Фиксированные времена для уведомлений
+            times = [
+                (9, 0),   # 09:00
+                (18, 0),  # 18:00
+                (22, 0)   # 22:00
+            ]
+            
+            # Настраиваем уведомления на каждое время
+            for i, (hour, minute) in enumerate(times):
+                scheduler.add_job(
+                    send_notification, 'cron', hour=hour, minute=minute,
+                    id=f"notify_{user_id}_daily_{i}",
+                    args=(context, user_id), timezone=pytz.UTC
+                )
+            
+            # Обновляем настройку в базе данных
+            db.update_notify_freq(user_id, "day_multi")
+            
+            update.message.reply_text(
+                "Уведомления настроены на ежедневную отправку в 09:00, 18:00 и 22:00."
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при настройке множественных ежедневных уведомлений: {e}")
+            update.message.reply_text(
+                "Произошла ошибка при настройке уведомлений. Пожалуйста, попробуйте позже."
+            )
+        return
+    
+    # Обработка еженедельных уведомлений
+    if freq == 'week':
+        day_of_week = 0  # Понедельник по умолчанию
+        
+        # Если указан день недели
+        if len(context.args) > 1:
+            try:
+                day_of_week = int(context.args[1])
+                if day_of_week < 0 or day_of_week > 6:
+                    raise ValueError("День недели должен быть от 0 до 6")
+            except ValueError:
+                update.message.reply_text(
+                    "Неверный формат дня недели. Используйте число от 0 до 6 (0=пн, 1=вт, 2=ср, 3=чт, 4=пт, 5=сб, 6=вс)."
+                )
+                return
+        
+        try:
+            # Удаляем существующие задачи для пользователя
+            for job in scheduler.get_jobs():
+                if job.id.startswith(f"notify_{user_id}"):
+                    job.remove()
+            
+            # Настраиваем еженедельное уведомление в указанный день недели
+            scheduler.add_job(
+                send_notification, 'cron', day_of_week=day_of_week, hour=9, minute=0,
+                id=f"notify_{user_id}_week",
+                args=(context, user_id), timezone=pytz.UTC
+            )
+            
+            # Преобразование числового дня недели в название
+            day_names = ["понедельник", "вторник", "среду", "четверг", "пятницу", "субботу", "воскресенье"]
+            day_name = day_names[day_of_week]
+            
+            # Обновляем настройку в базе данных
+            db.update_notify_freq(user_id, f"week_{day_of_week}")
+            
+            update.message.reply_text(
+                f"Уведомления настроены на еженедельную отправку в {day_name} в 09:00."
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при настройке еженедельных уведомлений: {e}")
+            update.message.reply_text(
+                "Произошла ошибка при настройке уведомлений. Пожалуйста, попробуйте позже."
+            )
+        return
 
 
 if __name__ == "__main__":

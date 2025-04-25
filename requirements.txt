@@ -3,5 +3,6 @@ APScheduler==3.6.3
 python-dotenv==1.0.0
 urllib3<2.0.0
 pytz==2023.3
+numpy==1.24.3
 matplotlib==3.5.3
 Pillow==9.5.0 

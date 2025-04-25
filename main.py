@@ -11,6 +11,7 @@ import pytz
 import sqlite3
 import types
 import re
+import sys
 
 from database import Database
 from utils import (
@@ -1573,6 +1574,11 @@ def process_timer_message(update: Update, context: CallbackContext) -> None:
 def process_grouped_timers(context):
     """Обработка группы пересланных таймеров"""
     try:
+        # В начале функции проверяем, не завершается ли интерпретатор
+        if hasattr(sys, '_shutdown_thread') and sys._shutdown_thread:
+            logger.info("Пропускаем обработку групповых таймеров - интерпретатор завершает работу")
+            return
+            
         # Проверяем, вызвана ли функция из планировщика или из обработчика сообщений
         if hasattr(context, 'job') and hasattr(context.job, 'context'):
             # Вызов из обработчика сообщений
@@ -1670,10 +1676,15 @@ def process_grouped_timers(context):
             
             update_user_data(context.bot, user_id, message)
     
+    except RuntimeError as e:
+        if "shutdown" in str(e).lower():
+            logger.info("Пропускаем обработку групповых таймеров из-за завершения работы интерпретатора")
+        else:
+            logger.error(f"Ошибка при обработке группы таймеров: {e}")
     except Exception as e:
         logger.error(f"Ошибка при обработке группы таймеров: {e}")
         try:
-            if chat_id:
+            if 'chat_id' in locals():
                 context.bot.send_message(
                     chat_id=chat_id,
                     text="Произошла ошибка при обработке таймеров. Пожалуйста, попробуйте позже."
@@ -2336,7 +2347,13 @@ def main() -> None:
     )
     
     # Ожидаем завершения (Ctrl+C)
-    updater.idle()
+    try:
+        updater.idle()
+    finally:
+        # Завершаем работу планировщика перед выходом
+        logger.info("Завершение работы планировщика...")
+        scheduler.shutdown(wait=False)
+        logger.info("Планировщик остановлен")
 
 
 def notify_command(update: Update, context: CallbackContext) -> None:

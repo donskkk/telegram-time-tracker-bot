@@ -9,12 +9,12 @@ services:
     container_name: telegram-time-tracker-bot
     restart: always
     volumes:
-      - base:/app/data
+      - base:/app/data  # ← Монтируем сетевой диск "base" в /app/data
     environment:
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
-      - DATABASE_PATH=/app/data/time_tracker.db
+      - DATABASE_PATH=/app/data/time_tracker.db  # ← Путь до базы в контейнере
     command: python main.py 
 
 volumes:
   base:
-    external: true
+    external: true  # ← Используем уже созданный сетевой диск на Dockhost

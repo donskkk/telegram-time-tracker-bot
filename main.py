@@ -107,6 +107,11 @@ def rate_input(update: Update, context: CallbackContext) -> int:
     
     logger.info(f"Получен ввод ставки от пользователя {user_id}: '{user_input}'")
     
+    # Проверяем, не является ли это сообщением таймера
+    if "таймер остановлен" in user_input.lower() and "затрачено" in user_input.lower():
+        logger.info(f"Обнаружено сообщение таймера в состоянии RATE, перенаправляем на обработку таймера")
+        return process_timer_message(update, context)
+    
     # Пытаемся получить числовое значение ставки
     try:
         # Очищаем ввод от лишних символов
@@ -147,6 +152,11 @@ def goal_input(update: Update, context: CallbackContext) -> int:
     context.user_data['state'] = GOAL
     
     logger.info(f"Получен ввод цели от пользователя {user_id}: '{user_input}'")
+    
+    # Проверяем, не является ли это сообщением таймера
+    if "таймер остановлен" in user_input.lower() and "затрачено" in user_input.lower():
+        logger.info(f"Обнаружено сообщение таймера в состоянии GOAL, перенаправляем на обработку таймера")
+        return process_timer_message(update, context)
     
     # Пытаемся получить числовое значение цели
     try:
@@ -1597,10 +1607,23 @@ def process_grouped_timers(context: CallbackContext):
         )
         
         # Сохраняем ID сообщения и общее время для использования при подтверждении
-        if message and hasattr(context, 'user_data') and context.user_data is not None:
-            context.user_data['last_bot_message'] = (message.chat_id, message.message_id)
-            context.user_data['timer_group_minutes'] = total_minutes
-            logger.info(f"Отправлено сообщение с подтверждением группы таймеров, ID: {message.message_id}")
+        if message:
+            # Получаем доступ к user_data через специальный обработчик
+            from telegram.ext.dispatcher import run_async
+            
+            @run_async
+            def update_user_data(bot, user_id, message):
+                try:
+                    # Получаем dispatcher из bot
+                    dispatcher = bot.dispatcher
+                    if dispatcher and dispatcher.user_data.get(user_id) is not None:
+                        dispatcher.user_data[user_id]['last_bot_message'] = (message.chat_id, message.message_id)
+                        dispatcher.user_data[user_id]['timer_group_minutes'] = total_minutes
+                        logger.info(f"Отправлено сообщение с подтверждением группы таймеров, ID: {message.message_id}")
+                except Exception as e:
+                    logger.error(f"Ошибка при обновлении user_data: {e}")
+            
+            update_user_data(context.bot, user_id, message)
     
     except Exception as e:
         logger.error(f"Ошибка при обработке группы таймеров: {e}")
@@ -1866,6 +1889,11 @@ def change_rate_input(update: Update, context: CallbackContext) -> int:
     
     logger.info(f"Обработка ввода новой ставки от пользователя {user_id}: '{user_text}'")
     
+    # Проверяем, не является ли это сообщением таймера
+    if "таймер остановлен" in user_text.lower() and "затрачено" in user_text.lower():
+        logger.info(f"Обнаружено сообщение таймера в состоянии CHANGE_RATE, перенаправляем на обработку таймера")
+        return process_timer_message(update, context)
+    
     try:
         # Очищаем ввод от лишних символов
         rate_text = user_text.replace('₽', '').replace('р', '').replace('руб', '')
@@ -1943,6 +1971,11 @@ def change_goal_input(update: Update, context: CallbackContext) -> int:
     context.user_data['state'] = CHANGE_GOAL
     
     logger.info(f"Обработка ввода новой цели от пользователя {user_id}: '{user_text}'")
+    
+    # Проверяем, не является ли это сообщением таймера
+    if "таймер остановлен" in user_text.lower() and "затрачено" in user_text.lower():
+        logger.info(f"Обнаружено сообщение таймера в состоянии CHANGE_GOAL, перенаправляем на обработку таймера")
+        return process_timer_message(update, context)
     
     try:
         # Очищаем ввод от лишних символов
@@ -2179,7 +2212,7 @@ def main() -> None:
         'interval',
         minutes=1,  # Запускаем каждую минуту
         id="process_grouped_timers",
-        args=(updater.dispatcher,),
+        args=(updater.dispatcher.job_queue,),
         timezone=pytz.UTC  # Добавьте эту строку
     )
     

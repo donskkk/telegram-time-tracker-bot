@@ -1492,18 +1492,12 @@ def process_timer_message(update: Update, context: CallbackContext) -> None:
     message_text = update.message.text
     user_id = update.effective_user.id
     
-    # Проверяем, не находится ли пользователь в одном из состояний ввода
-    if context.user_data.get('state') in [CHANGE_RATE, CHANGE_GOAL, RATE, GOAL, CONFIRM_TIME, CHANGE_NOTIFY]:
-        # В этом случае обработка переадресуется соответствующей функции ввода
-        # и не обрабатывается здесь, поскольку функции ввода теперь сами умеют обрабатывать сообщения таймера
-        state = context.user_data.get('state')
-        logger.info(f"Пропускаем обработку сообщения как таймера, т.к. пользователь в состоянии ввода: {state}")
-        return
-    
     logger.info(f"Получено сообщение с возможным таймером от пользователя {user_id}: '{message_text}'")
     
     # Проверяем, есть ли в сообщении текст о таймере
     if "таймер остановлен" in message_text.lower() and "затрачено" in message_text.lower():
+        # Всегда обрабатываем сообщения таймера независимо от состояния пользователя
+        
         # Парсим время из сообщения
         minutes = parse_timer_message(message_text)
         
@@ -1554,10 +1548,26 @@ def process_timer_message(update: Update, context: CallbackContext) -> None:
                 else:
                     # Это обычное сообщение с таймером, обрабатываем сразу
                     process_single_timer(update, context, minutes)
+                
+                # Очищаем состояние пользователя, если оно было
+                if 'state' in context.user_data:
+                    old_state = context.user_data.get('state')
+                    del context.user_data['state']
+                    logger.info(f"Очищено состояние пользователя {old_state} после обработки таймера")
+                    
+                return
             except Exception as e:
                 logger.error(f"Ошибка при обработке сообщения с таймером: {e}")
                 # В случае ошибки всё равно пытаемся обработать одиночный таймер
                 process_single_timer(update, context, minutes)
+                return
+    
+    # Для обычных сообщений (не таймеров) проверяем состояние пользователя
+    if context.user_data.get('state') in [CHANGE_RATE, CHANGE_GOAL, RATE, GOAL, CONFIRM_TIME, CHANGE_NOTIFY]:
+        # В этом случае обработка переадресуется соответствующей функции ввода
+        state = context.user_data.get('state')
+        logger.info(f"Пропускаем обработку обычного сообщения, т.к. пользователь в состоянии ввода: {state}")
+        return
 
 
 def process_grouped_timers(context):
@@ -1647,6 +1657,13 @@ def process_grouped_timers(context):
                     if dispatcher and dispatcher.user_data.get(user_id) is not None:
                         dispatcher.user_data[user_id]['last_bot_message'] = (message.chat_id, message.message_id)
                         dispatcher.user_data[user_id]['timer_group_minutes'] = total_minutes
+                        
+                        # Очищаем состояние пользователя, если оно было
+                        if 'state' in dispatcher.user_data[user_id]:
+                            old_state = dispatcher.user_data[user_id].get('state')
+                            del dispatcher.user_data[user_id]['state']
+                            logger.info(f"Очищено состояние пользователя {old_state} после обработки группы таймеров")
+                        
                         logger.info(f"Отправлено сообщение с подтверждением группы таймеров, ID: {message.message_id}")
                 except Exception as e:
                     logger.error(f"Ошибка при обновлении user_data: {e}")
@@ -1728,6 +1745,12 @@ def process_single_timer(update, context, minutes):
         
         # Сохраняем минуты в контексте для использования при подтверждении
         context.user_data['timer_minutes'] = minutes
+        
+        # Очищаем состояние пользователя, если оно было
+        if 'state' in context.user_data:
+            old_state = context.user_data.get('state')
+            del context.user_data['state']
+            logger.info(f"Очищено состояние пользователя {old_state} после обработки одиночного таймера")
         
     except Exception as e:
         logger.error(f"Общая ошибка при обработке таймера: {e}")
@@ -1926,7 +1949,6 @@ def change_rate_input(update: Update, context: CallbackContext) -> int:
             del context.user_data['state']
             
         # Парсим время из сообщения таймера
-        from utils import parse_timer_message
         minutes = parse_timer_message(user_text)
         
         if minutes:

@@ -1584,8 +1584,8 @@ def process_timer_message(update: Update, context: CallbackContext) -> None:
         logger.info(f"Пропускаем обработку обычного сообщения, т.к. пользователь в состоянии ввода: {state}")
         
         # Проверяем, что сообщение не является просто числом, которое может быть целью или ставкой
-        if state in [CHANGE_GOAL, GOAL] and message_text.strip().replace('.', '').isdigit():
-            logger.info(f"Обнаружен числовой ввод '{message_text}' в состоянии {state}, обрабатываем как ввод цели")
+        if state in [CHANGE_GOAL, GOAL, CHANGE_RATE, RATE] and message_text.strip().replace('.', '').isdigit():
+            logger.info(f"Обнаружен числовой ввод '{message_text}' в состоянии {state}, обрабатываем как числовой ввод")
             # Не возвращаем здесь ничего, чтобы продолжить нормальную обработку в соответствующем обработчике
             return
         
@@ -1601,16 +1601,19 @@ def process_grouped_timers(context):
             return
             
         # Проверяем, вызвана ли функция из планировщика или из обработчика сообщений
-        if hasattr(context, 'job') and hasattr(context.job, 'context'):
-            # Вызов из обработчика сообщений
+        if hasattr(context, 'job') and hasattr(context.job, 'context') and context.job.context is not None and isinstance(context.job.context, tuple):
+            # Вызов из обработчика сообщений через job_queue.run_once
             user_id, chat_id, timer_buffer = context.job.context
         elif isinstance(context, CallbackContext) and isinstance(context.job_queue, JobQueue):
-            # Вызов из планировщика
-            # В этом случае нам нечего обрабатывать, так как это просто проверка наличия таймеров
+            # Вызов из планировщика по расписанию
             logger.info("Обработка групповых таймеров из планировщика - нет таймеров для обработки")
             return
+        elif context is None:
+            # Вызов из основного планировщика (APScheduler)
+            logger.info("Проверка групповых таймеров из основного планировщика")
+            return
         else:
-            logger.error("Неизвестный контекст вызова process_grouped_timers")
+            logger.error(f"Неизвестный контекст вызова process_grouped_timers: {type(context)}")
             return
         
         logger.info(f"Обработка группы таймеров для пользователя {user_id}")
@@ -2329,7 +2332,7 @@ def main() -> None:
             'interval',
             minutes=1,
             id="process_grouped_timers",
-            args=(None,),  # Передаем None вместо dispatcher.bot.dispatcher
+            args=(None,),  # Передаем None как признак вызова из планировщика
             timezone=pytz.UTC
         )
 
